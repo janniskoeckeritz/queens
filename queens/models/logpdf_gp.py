@@ -80,6 +80,7 @@ class LogpdfGP(Model):
         upper_bound=None,
         quantile=0.9,
         jitter=1.0e-16,
+        use_gradient_observations=False,
     ):
         """Initialize LogpdfGP.
 
@@ -123,6 +124,7 @@ class LogpdfGP(Model):
         self.jit_func_generate_output = None
         self.partial_hyperparameter_log_prob = None
         self.batch_size = int(4e8)
+        self.use_gradient_observations = use_gradient_observations
 
         super().__init__()
 
@@ -247,6 +249,40 @@ class LogpdfGP(Model):
             chol_k_train_train.T, jnp.linalg.solve(chol_k_train_train, self.y_train)
         )
         return chol_k_train_train, v_train
+
+    def calc_train_factor_with_grad(self, hyperparameters, y_train_grad):
+        num_train_points = self.x_train.shape[0]
+        length_scales = hyperparameters[:-1]
+
+        dists = distances(self.x_train, self.x_train)
+        k_train_train = rbf_by_dists(dists, hyperparameters)
+
+        length_adjusted_dists = jnp.einsum("ijk,k->ijk", dists, 1/(length_scales**2))
+        train_tain_grad = jnp.einsum("ij,ijk->ijk", k_train_train, length_adjusted_dists)
+        train_tain_grad.reshape((num_train_points, -1))
+
+        grad_train_train_grad = jnp.einsum("ijk,ijl->ijkl", length_adjusted_dists, 
+                                           length_adjusted_dists)
+        grad_train_train_grad = jnp.einsum("ij,ijkl->ijkl", k_train_train, grad_train_train_grad)
+        grad_train_train_grad += jnp.einsum("ij,kl", k_train_train, jnp.diag(1/(length_scales**2)))
+
+        k_train_train_with_grad = np.empty((num_train_points*(1+self.num_dim), 
+                                            num_train_points*(1+self.num_dim)))
+        k_train_train_with_grad[:num_train_points, :num_train_points] = k_train_train
+        k_train_train_with_grad[:num_train_points, num_train_points:] = train_tain_grad
+        k_train_train_with_grad[num_train_points:, :num_train_points] = train_tain_grad.T
+        k_train_train_with_grad[:num_train_points, :num_train_points] = grad_train_train_grad
+
+        chol_k_train_train = safe_cholesky(k_train_train_with_grad, hyperparameters[-1])
+
+        y_train_combined = jnp.vstack((self.y_train, y_train_grad.reshape(-1, 1)))
+
+        v_train = jnp.linalg.solve(
+            chol_k_train_train.T, jnp.linalg.solve(chol_k_train_train, y_train_combined)
+        )
+        return chol_k_train_train, v_train
+
+
 
     def evaluate(self, samples):
         """Evaluate model with current set of input samples.
