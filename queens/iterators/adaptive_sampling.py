@@ -182,6 +182,7 @@ class AdaptiveSampling(Iterator):
             self.model_gradients = np.concatenate([self.model_gradients, model_gradients], axis=0)
         else:
             model_output = self.likelihood_model.forward_model.evaluate(self.x_train_new)["result"]
+        
         self.model_outputs = np.concatenate([self.model_outputs, model_output], axis=0)
 
         if self.likelihood_model.noise_type.startswith("MAP"):
@@ -189,12 +190,12 @@ class AdaptiveSampling(Iterator):
 
         log_likelihood = self.likelihood_model.normal_distribution.logpdf(self.model_outputs)
         log_likelihood -= self.likelihood_model.normal_distribution.logpdf_const
-        log_likelihood.reshape(-1, 1)
+        log_likelihood = log_likelihood.reshape((-1, 1))
 
         if self.use_model_gradients:
             log_likelihood_grad = np.einsum("bi,bij->bj",
                         self.likelihood_model.normal_distribution.grad_logpdf(self.model_outputs),
-                        model_gradients)
+                        self.model_gradients)
         else:
             log_likelihood_grad = None
 
@@ -245,6 +246,9 @@ class AdaptiveSampling(Iterator):
                 "log_posterior": [],
                 "cs_div": [],
             }
+            if self.use_model_gradients:
+                results["model_gradients"] = []
+                results["y_train_grad"] = []
             cs_div = np.nan
         else:
             results = load_result(result_file)
@@ -265,6 +269,9 @@ class AdaptiveSampling(Iterator):
         results["weights"].append(weights)
         results["log_posterior"].append(log_posterior)
         results["cs_div"].append(cs_div)
+        if self.use_model_gradients:
+            results["model_gradients"].append(self.model_gradients)
+            results["y_train_grad"].append(self.y_grad_train)
 
         with open(result_file, "wb") as handle:
             pickle.dump(results, handle, protocol=pickle.HIGHEST_PROTOCOL)
