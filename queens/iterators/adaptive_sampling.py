@@ -103,6 +103,8 @@ class AdaptiveSampling(Iterator):
         self.model_outputs = None
         self.y_grad_train = None
         self.model_gradients = None
+        self.log_likelihoods = None
+        self.log_likelihoods_grad = None
         self.use_model_gradients = False
 
         if isinstance(self.model, LogpdfGP):
@@ -119,9 +121,11 @@ class AdaptiveSampling(Iterator):
             self.model_outputs = results["model_outputs"][-1]
             self.y_train = results["y_train"][-1]
             self.x_train_new = results["x_train_new"][-1]
+            self.log_likelihoods = results["log_likelihoods"]
             if self.use_model_gradients:
                 self.model_gradients = results["model_gradients"][-1]
                 self.y_grad_train = results["y_gradients_train"][-1]
+                self.log_likelihoods_grad = results["log_likelihoods_grad"]
 
         else:
             self.initial_train_iterator.pre_run()
@@ -129,11 +133,13 @@ class AdaptiveSampling(Iterator):
             self.x_train = np.empty((0, self.parameters.num_parameters))
             self.y_train = np.empty((0, 1))
             self.model_outputs = np.empty((0, self.likelihood_model.normal_distribution.mean.size))
+            self.log_likelihoods = np.empty((0, 1))
             if self.use_model_gradients:
                 self.y_grad_train = np.empty((0, self.parameters.num_parameters))
                 self.model_gradients = np.empty((0, 
                                                 self.likelihood_model.normal_distribution.mean.size,
                                                 self.parameters.num_parameters))
+                self.log_likelihoods_grad = np.empty((0, self.parameters.num_parameters))
 
     def core_run(self):
         """Core run."""
@@ -177,29 +183,57 @@ class AdaptiveSampling(Iterator):
         Returns:
             log_likelihood (np.ndarray): Log likelihood
         """
-        if self.use_model_gradients:
-            model_output, model_gradients = self.likelihood_model.forward_model.evaluate_and_gradient(self.x_train_new)
-            self.model_gradients = np.concatenate([self.model_gradients, model_gradients], axis=0)
-        else:
-            model_output = self.likelihood_model.forward_model.evaluate(self.x_train_new)["result"]
+        #if self.use_model_gradients:
+            #model_output, model_gradients = self.likelihood_model.forward_model.evaluate_and_gradient(self.x_train_new)
+            #self.model_gradients = np.concatenate([self.model_gradients, model_gradients], axis=0)
+        #else:
+            #model_output = self.likelihood_model.forward_model.evaluate(self.x_train_new)["result"]
         
-        self.model_outputs = np.concatenate([self.model_outputs, model_output], axis=0)
+        #self.model_outputs = np.concatenate([self.model_outputs, model_output], axis=0)
 
-        if self.likelihood_model.noise_type.startswith("MAP"):
-            self.likelihood_model.update_covariance(model_output)
+        #if self.likelihood_model.noise_type.startswith("MAP"):
+            #self.likelihood_model.update_covariance(model_output)
 
-        log_likelihood = self.likelihood_model.normal_distribution.logpdf(self.model_outputs)
-        log_likelihood -= self.likelihood_model.normal_distribution.logpdf_const
-        log_likelihood = log_likelihood.reshape((-1, 1))
+        #log_likelihood = self.likelihood_model.normal_distribution.logpdf(self.model_outputs)
+        #log_likelihood -= self.likelihood_model.normal_distribution.logpdf_const
+        #log_likelihood = log_likelihood.reshape((-1, 1))
+        #breakpoint()
+
+        #if self.use_model_gradients:
+            #log_likelihood_grad = np.einsum("bi,bij->bj",
+                        #self.likelihood_model.normal_distribution.grad_logpdf(self.model_outputs),
+                        #self.model_gradients)
+        #else:
+            #model_output = self.likelihood_model.forward_model.evaluate(self.x_train_new)["result"]
+            #log_likelihood_grad = None
 
         if self.use_model_gradients:
-            log_likelihood_grad = np.einsum("bi,bij->bj",
-                        self.likelihood_model.normal_distribution.grad_logpdf(self.model_outputs),
-                        self.model_gradients)
-        else:
-            log_likelihood_grad = None
+            # Evaluate likelihood model with gradients
+            result = self.likelihood_model.evaluate_and_gradient(self.x_train_new)
+            log_likelihood, log_likelihood_grad = result
 
-        return log_likelihood, log_likelihood_grad
+            log_likelihood -= self.likelihood_model.normal_distribution.logpdf_const
+            log_likelihood = log_likelihood.reshape((-1, 1))
+            
+            # Update stored values
+            self.log_likelihoods = np.concatenate(
+                [self.log_likelihoods, log_likelihood], axis=0
+            )
+            self.log_likelihoods_grad = np.concatenate(
+                [self.log_likelihoods_grad, log_likelihood_grad], axis=0
+            )
+        else:
+            # Evaluate likelihood model without gradients
+            log_likelihood = self.likelihood_model.evaluate(self.x_train_new)["result"]
+            log_likelihood -= self.likelihood_model.normal_distribution.logpdf_const
+            log_likelihood = log_likelihood.reshape((-1, 1))
+            
+            # Update stored values
+            self.log_likelihoods = np.concatenate(
+                [self.log_likelihoods, log_likelihood], axis=0
+            )
+
+        return self.log_likelihoods, self.log_likelihoods_grad
     
     def eval_log_likelihood_grad(self):
         pass
@@ -245,10 +279,12 @@ class AdaptiveSampling(Iterator):
                 "weights": [],
                 "log_posterior": [],
                 "cs_div": [],
+                "log_likelihoods": [],
             }
             if self.use_model_gradients:
                 results["model_gradients"] = []
                 results["y_train_grad"] = []
+                results["log_likelihoods_grad"] = []
             cs_div = np.nan
         else:
             results = load_result(result_file)
@@ -269,9 +305,11 @@ class AdaptiveSampling(Iterator):
         results["weights"].append(weights)
         results["log_posterior"].append(log_posterior)
         results["cs_div"].append(cs_div)
+        results["log_likelihoods"].append(self.log_likelihoods)
         if self.use_model_gradients:
             results["model_gradients"].append(self.model_gradients)
             results["y_train_grad"].append(self.y_grad_train)
+            results["log_likelihoods_grad"].append(self.log_likelihoods_grad)
 
         with open(result_file, "wb") as handle:
             pickle.dump(results, handle, protocol=pickle.HIGHEST_PROTOCOL)

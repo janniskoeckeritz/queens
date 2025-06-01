@@ -71,7 +71,10 @@ class Simulation(Model):
         """
         if self.response.get("gradient") is None:
             raise ValueError("Gradient information not available.")
-        # The shape of the returned gradient is weird
-        response_gradient = np.swapaxes(self.response["gradient"], 1, 2)
+        elif self.response["gradient"].shape == (samples.shape[0], 1):
+            response_gradient = self.response["gradient"].reshape((-1, 1, 1))
+        else:
+            # The shape of the returned gradient is weird
+            response_gradient = np.swapaxes(self.response["gradient"], 1, 2)
         gradient = np.sum(upstream_gradient[:, :, np.newaxis] * response_gradient, axis=1)
         return gradient

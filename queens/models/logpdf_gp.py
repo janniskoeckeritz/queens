@@ -123,7 +123,7 @@ class LogpdfGP(Model):
         self.v_train = None
         self.jit_func_generate_output = None
         self.partial_hyperparameter_log_prob = None
-        self.batch_size = int(4e8)
+        self.batch_size = int(4e7)
         self.y_train_grad = None
         self.use_gradient_observations = use_gradient_observations
 
@@ -145,7 +145,12 @@ class LogpdfGP(Model):
         self.scaler_y = np.max(np.abs(y_train))
         self.y_train = y_train / self.scaler_y - self.prior_gp_mean
         if y_train_grad is not None:
-            self.y_train_grad = y_train_grad / self.scaler_y
+            y_train_grad = y_train_grad / self.scaler_y
+            self.y_train_grad = np.einsum(
+                "ij,j->ij",
+                y_train_grad,
+                (self.scaler_x.var_)**0.5
+            )
         if self.upper_bound is None:
             self.upper_bound = -0.5 * stats.chi2(num_observations).ppf(0.05)
         self.upper_bound = np.array(max(y_train.max(), self.upper_bound))
@@ -257,6 +262,7 @@ class LogpdfGP(Model):
                                   samples and training output samples
         """
         if self.use_gradient_observations:
+            breakpoint()
             num_train_points = self.x_train.shape[0]
             length_scales = hyperparameters[:-2]
 
@@ -280,11 +286,13 @@ class LogpdfGP(Model):
             k_grad_train_train_grad = k_grad_train_train_grad.reshape(
                 (self.num_dim*num_train_points, self.num_dim*num_train_points))
 
-            k_train_train += jnp.eye(k_train_train.shape[0])*hyperparameters[-1]
+            #k_train_train += jnp.eye(k_train_train.shape[0])*hyperparameters[-1]
             k_train_train_with_grad = jnp.vstack([
                 jnp.hstack([k_train_train, k_train_train_grad]),
                 jnp.hstack([k_train_train_grad.T, k_grad_train_train_grad])
             ])
+            breakpoint()
+            k_train_train_with_grad += jnp.eye(k_train_train_with_grad.shape[0]) * hyperparameters[-1]
             k_train_train_with_grad += jnp.eye(k_train_train_with_grad.shape[0]) * self.jitter
 
             #k_train_train_with_grad = np.empty((num_train_points*(1+self.num_dim),
@@ -447,6 +455,15 @@ class LogpdfGP(Model):
             mean (np.ndarray): Mean of unconstrained GP at test samples
             std (np.ndarray): Standard deviation of unconstrained GP at test samples.
         """
+        #print({
+            #"dists_test_train": dists_test_train,
+            #"hyperparamters": hyperparameters,
+            #"v_train": v_train,
+            #"chol_k_train_train": chol_k_train_train,
+            #"prior_gp_mean": prior_gp_mean,
+            #"scaler_y": scaler_y,
+            #"use_gradient_observatoins": use_gradient_observations,
+        #})
         if use_gradient_observations:
             k_test_train = rbf_by_dists(dists_test_train, hyperparameters[:-1])
             num_test_points = dists_test_train.shape[0]
@@ -634,13 +651,14 @@ class LogpdfGP(Model):
             k_grad_train_train_grad = k_grad_train_train_grad.reshape((num_dim*num_train_points,
                                                                        num_dim*num_train_points))
 
-            k_train_train += jnp.eye(k_train_train.shape[0])*hyperparameters[-1]
+            #k_train_train += jnp.eye(k_train_train.shape[0])*hyperparameters[-1]
 
             k_train_train_with_grad = jnp.vstack([
                 jnp.hstack([k_train_train, k_train_train_grad]),
                 jnp.hstack([k_train_train_grad.T, k_grad_train_train_grad])
             ])
 
+            k_train_train_with_grad += jnp.eye(k_train_train_with_grad.shape[0]) * hyperparameters[-1]
             k_train_train_with_grad += jnp.eye(k_train_train_with_grad.shape[0]) * jitter
 
             y_train_combined = jnp.vstack((y_train, y_train_grad.reshape(-1, 1)))
@@ -698,7 +716,7 @@ class LogpdfGP(Model):
             np.ndarray: Log joint probability of hyperparameters
         """
         hyperparameters = jnp.exp(transformed_hyperparameters)
-        log_likelihood = log_likelihood_func(hyperparameters, x_train, y_train, y_train_grad, 
+        log_likelihood = log_likelihood_func(hyperparameters, x_train, y_train, y_train_grad,
                                              jitter)
         log_prior = log_prior_func(hyperparameters, prior_rate)
         forward_log_det = jnp.sum(transformed_hyperparameters)
