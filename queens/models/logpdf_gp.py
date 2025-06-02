@@ -31,9 +31,25 @@ from queens.utils import jax_minimize_wrapper
 from queens.utils.gpflow_transformations import init_scaler
 from queens.utils.numpy_linalg import safe_cholesky
 
+from queens.utils.gp_kernels import Kernel, kernel_fn_rbf
+
 _logger = logging.getLogger(__name__)
 jax.config.update("jax_enable_x64", True)
 
+def old_to_new_hyperparameters(hyperparameters):
+    """Convert old hyperparameters to new format.
+
+    Args:
+        hyperparameters (np.ndarray): Old hyperparameters
+
+    Returns:
+        np.ndarray: New hyperparameters
+    """
+    return {
+        "length_scales": hyperparameters[:-2],
+        "signal_std": hyperparameters[-2],
+        "noise": hyperparameters[-1],
+    }
 
 class LogpdfGP(Model):
     """LogpdfGP Class.
@@ -79,6 +95,7 @@ class LogpdfGP(Model):
         prior_gp_mean=-1.0,
         upper_bound=None,
         quantile=0.9,
+        kernel=Kernel(kernel_fn_rbf),
         jitter=1.0e-16,
         use_gradient_observations=False,
     ):
@@ -126,6 +143,7 @@ class LogpdfGP(Model):
         self.batch_size = int(4e7)
         self.y_train_grad = None
         self.use_gradient_observations = use_gradient_observations
+        self.kernel = kernel
 
         super().__init__()
 
@@ -172,6 +190,7 @@ class LogpdfGP(Model):
                 log_likelihood_func=self.hyperparameter_log_likelihood,
                 log_prior_func=self.hyperparameter_log_prior,
                 prior_rate=self.prior_rate,
+                kernel=self.kernel,
             )
         )
 
@@ -214,7 +233,9 @@ class LogpdfGP(Model):
             self.evaluate_mean_and_std,
             prior_gp_mean=self.prior_gp_mean,
             scaler_y=self.scaler_y,
-            use_gradient_observations=self.use_gradient_observations
+            use_gradient_observations=self.use_gradient_observations,
+            kernel=self.kernel,
+            x_train=self.x_train,
         )
 
         if self.approx_type in ["CFBGP", "CGPMAP-II"]:
@@ -224,8 +245,8 @@ class LogpdfGP(Model):
             else:
                 generate_output_func = self.generate_output_cgpmap_2
 
-            self.jit_func_generate_output = jit(
-                partial(
+            #self.jit_func_generate_output = jit(
+            self.jit_func_generate_output = partial(
                     generate_output_func,
                     x_train=self.x_train,
                     hyperparameters=self.hyperparameters,
@@ -235,7 +256,6 @@ class LogpdfGP(Model):
                     eval_mean_and_std=eval_mean_and_std,
                     quantile=self.quantile,
                 )
-            )
 
         else:
             self.jit_func_generate_output = jit(
@@ -261,65 +281,82 @@ class LogpdfGP(Model):
             v_train (np.ndarray): Matrix product of inverse of Gram matrix evaluated at training
                                   samples and training output samples
         """
-        if self.use_gradient_observations:
-            breakpoint()
-            num_train_points = self.x_train.shape[0]
-            length_scales = hyperparameters[:-2]
+        #if self.use_gradient_observations:
+            #breakpoint()
+            #num_train_points = self.x_train.shape[0]
+            #length_scales = hyperparameters[:-2]
 
-            dists = distances(self.x_train, self.x_train)
-            k_train_train = rbf_by_dists(dists, hyperparameters[:-1])
+            #dists = distances(self.x_train, self.x_train)
+            #k_train_train = rbf_by_dists(dists, hyperparameters[:-1])
+            ##k_train_train += jnp.eye(k_train_train.shape[0]) * hyperparameters[-1]
+            ##k_train_train = k_train_train + jnp.eye(k_train_train.shape[0]) * self.jitter
+
+            #length_adjusted_dists = jnp.einsum("ijk,k->ijk", dists, 1/(length_scales**2))
+            #k_train_train_grad = jnp.einsum("ij,ijk->ijk", k_train_train, length_adjusted_dists)
+            #k_train_train_grad = k_train_train_grad.reshape((num_train_points, -1))
+
+            #k_grad_train_train_grad = jnp.einsum("ij,kl->ijkl", 
+                                                 #jnp.ones((num_train_points, num_train_points)),
+                                                 #jnp.diag(1/(length_scales**2)))
+            #k_grad_train_train_grad -= jnp.einsum("ijk,ijl->ijkl", length_adjusted_dists, 
+                                                  #length_adjusted_dists)
+            #k_grad_train_train_grad = jnp.einsum("ijkl,ij->ijkl", k_grad_train_train_grad, 
+                                                 #k_train_train)
+            #k_grad_train_train_grad = k_grad_train_train_grad.transpose((0,2,1,3))
+            #k_grad_train_train_grad = k_grad_train_train_grad.reshape(
+                #(self.num_dim*num_train_points, self.num_dim*num_train_points))
+
+            ##k_train_train += jnp.eye(k_train_train.shape[0])*hyperparameters[-1]
+            #k_train_train_with_grad = jnp.vstack([
+                #jnp.hstack([k_train_train, k_train_train_grad]),
+                #jnp.hstack([k_train_train_grad.T, k_grad_train_train_grad])
+            #])
+            #breakpoint()
+            #k_train_train_with_grad += jnp.eye(k_train_train_with_grad.shape[0]) * hyperparameters[-1]
+            #k_train_train_with_grad += jnp.eye(k_train_train_with_grad.shape[0]) * self.jitter
+
+            ##k_train_train_with_grad = np.empty((num_train_points*(1+self.num_dim),
+                                                ##num_train_points*(1+self.num_dim)))
+            ##k_train_train_with_grad[:num_train_points, :num_train_points] = k_train_train
+            ##k_train_train_with_grad[:num_train_points, num_train_points:] = k_train_train_grad
+            ##k_train_train_with_grad[num_train_points:, :num_train_points] = k_train_train_grad.T
+            ##k_train_train_with_grad[num_train_points:, num_train_points:] = k_grad_train_train_grad
+
+            #chol_k_train_train = safe_cholesky(k_train_train_with_grad, hyperparameters[-1])
+
+            #y_train_combined = jnp.vstack((self.y_train, self.y_train_grad.reshape(-1, 1)))
+
+            #v_train = jnp.linalg.solve(
+                #chol_k_train_train.T, jnp.linalg.solve(chol_k_train_train, y_train_combined)
+            #)
+
+            #return chol_k_train_train, v_train
+        #else:
+            #k_train_train = rbf(self.x_train, self.x_train, hyperparameters[:-1])
             #k_train_train += jnp.eye(k_train_train.shape[0]) * hyperparameters[-1]
+            #k_train_train = self.kernel.compute_full_cov_matrix(
+                #self.x_train, 
+                #self.x_train, 
+                #old_to_new_hyperparameters(hyperparameters),
+            #)
             #k_train_train = k_train_train + jnp.eye(k_train_train.shape[0]) * self.jitter
+            #chol_k_train_train = safe_cholesky(k_train_train, hyperparameters[-1])
+            #v_train = jnp.linalg.solve(
+                #chol_k_train_train.T, jnp.linalg.solve(chol_k_train_train, self.y_train)
+            #)
+            #return chol_k_train_train, v_train
 
-            length_adjusted_dists = jnp.einsum("ijk,k->ijk", dists, 1/(length_scales**2))
-            k_train_train_grad = jnp.einsum("ij,ijk->ijk", k_train_train, length_adjusted_dists)
-            k_train_train_grad = k_train_train_grad.reshape((num_train_points, -1))
-
-            k_grad_train_train_grad = jnp.einsum("ij,kl->ijkl", 
-                                                 jnp.ones((num_train_points, num_train_points)),
-                                                 jnp.diag(1/(length_scales**2)))
-            k_grad_train_train_grad -= jnp.einsum("ijk,ijl->ijkl", length_adjusted_dists, 
-                                                  length_adjusted_dists)
-            k_grad_train_train_grad = jnp.einsum("ijkl,ij->ijkl", k_grad_train_train_grad, 
-                                                 k_train_train)
-            k_grad_train_train_grad = k_grad_train_train_grad.transpose((0,2,1,3))
-            k_grad_train_train_grad = k_grad_train_train_grad.reshape(
-                (self.num_dim*num_train_points, self.num_dim*num_train_points))
-
-            #k_train_train += jnp.eye(k_train_train.shape[0])*hyperparameters[-1]
-            k_train_train_with_grad = jnp.vstack([
-                jnp.hstack([k_train_train, k_train_train_grad]),
-                jnp.hstack([k_train_train_grad.T, k_grad_train_train_grad])
-            ])
-            breakpoint()
-            k_train_train_with_grad += jnp.eye(k_train_train_with_grad.shape[0]) * hyperparameters[-1]
-            k_train_train_with_grad += jnp.eye(k_train_train_with_grad.shape[0]) * self.jitter
-
-            #k_train_train_with_grad = np.empty((num_train_points*(1+self.num_dim),
-                                                #num_train_points*(1+self.num_dim)))
-            #k_train_train_with_grad[:num_train_points, :num_train_points] = k_train_train
-            #k_train_train_with_grad[:num_train_points, num_train_points:] = k_train_train_grad
-            #k_train_train_with_grad[num_train_points:, :num_train_points] = k_train_train_grad.T
-            #k_train_train_with_grad[num_train_points:, num_train_points:] = k_grad_train_train_grad
-
-            chol_k_train_train = safe_cholesky(k_train_train_with_grad, hyperparameters[-1])
-
-            y_train_combined = jnp.vstack((self.y_train, self.y_train_grad.reshape(-1, 1)))
-
-            v_train = jnp.linalg.solve(
-                chol_k_train_train.T, jnp.linalg.solve(chol_k_train_train, y_train_combined)
-            )
-
-            return chol_k_train_train, v_train
-        else:
-            k_train_train = rbf(self.x_train, self.x_train, hyperparameters[:-1])
-            k_train_train += jnp.eye(k_train_train.shape[0]) * hyperparameters[-1]
-            k_train_train = k_train_train + jnp.eye(k_train_train.shape[0]) * self.jitter
-            chol_k_train_train = safe_cholesky(k_train_train, hyperparameters[-1])
-            v_train = jnp.linalg.solve(
-                chol_k_train_train.T, jnp.linalg.solve(chol_k_train_train, self.y_train)
-            )
-            return chol_k_train_train, v_train
+        k_train_train = self.kernel.compute_full_cov_matrix(
+            self.x_train, 
+            self.x_train, 
+            old_to_new_hyperparameters(hyperparameters),
+        )
+        k_train_train = k_train_train + jnp.eye(k_train_train.shape[0]) * self.jitter
+        chol_k_train_train = safe_cholesky(k_train_train, hyperparameters[-1])
+        v_train = jnp.linalg.solve(
+            chol_k_train_train.T, jnp.linalg.solve(chol_k_train_train, self.y_train)
+        )
+        return chol_k_train_train, v_train
 
     def evaluate(self, samples):
         """Evaluate model with current set of input samples.
@@ -435,9 +472,12 @@ class LogpdfGP(Model):
         hyperparameters,
         v_train,
         chol_k_train_train,
+        x_test,
         prior_gp_mean,
         scaler_y,
         use_gradient_observations,
+        kernel,
+        x_train
     ):
         """Mean and standard deviation of unconstrained GP at test samples.
 
@@ -455,15 +495,15 @@ class LogpdfGP(Model):
             mean (np.ndarray): Mean of unconstrained GP at test samples
             std (np.ndarray): Standard deviation of unconstrained GP at test samples.
         """
-        #print({
-            #"dists_test_train": dists_test_train,
-            #"hyperparamters": hyperparameters,
-            #"v_train": v_train,
-            #"chol_k_train_train": chol_k_train_train,
-            #"prior_gp_mean": prior_gp_mean,
-            #"scaler_y": scaler_y,
-            #"use_gradient_observatoins": use_gradient_observations,
-        #})
+        ##print({
+            ##"dists_test_train": dists_test_train,
+            ##"hyperparamters": hyperparameters,
+            ##"v_train": v_train,
+            ##"chol_k_train_train": chol_k_train_train,
+            ##"prior_gp_mean": prior_gp_mean,
+            ##"scaler_y": scaler_y,
+            ##"use_gradient_observatoins": use_gradient_observations,
+        ##})
         if use_gradient_observations:
             k_test_train = rbf_by_dists(dists_test_train, hyperparameters[:-1])
             num_test_points = dists_test_train.shape[0]
@@ -479,7 +519,12 @@ class LogpdfGP(Model):
 
             k_test_train = jnp.hstack([k_test_train, k_test_train_grad])
         else:
-            k_test_train = rbf_by_dists(dists_test_train, hyperparameters[:-1])
+            k_test_train_old = rbf_by_dists(dists_test_train, hyperparameters[:-1])
+            k_test_train = kernel.compute_val_cov_matrix(
+                x_test,
+                x_train,
+                old_to_new_hyperparameters(hyperparameters),
+            )
 
         k_test_test = hyperparameters[-2] ** 2
         mean = jnp.dot(k_test_train, v_train)
@@ -491,6 +536,8 @@ class LogpdfGP(Model):
         std = var ** (1 / 2)  # + 1e-30
         std = std.reshape(-1)
         mean = (mean.reshape(-1) + prior_gp_mean) * scaler_y
+
+        breakpoint()
 
         return mean, std
 
@@ -524,7 +571,7 @@ class LogpdfGP(Model):
         """
         dists_test_train = distances(x_test, x_train)
         mean, std = eval_mean_and_std(
-            dists_test_train, hyperparameters, v_train, chol_k_train_train
+            dists_test_train, hyperparameters, v_train, chol_k_train_train, x_test
         )
 
         erfc_arg = (mean - upper_bound) / (jnp.sqrt(2) * std)
@@ -567,7 +614,7 @@ class LogpdfGP(Model):
         """
         dists_test_train = distances(x_test, x_train)
         mean, std = eval_mean_and_std(
-            dists_test_train, hyperparameters, v_train, chol_k_train_train
+            dists_test_train, hyperparameters, v_train, chol_k_train_train, x_test
         )
         mean = mean.reshape(-1, x_test.shape[0])
         std = std.reshape(-1, x_test.shape[0])
@@ -608,7 +655,7 @@ class LogpdfGP(Model):
         return log_likelihood
 
     @staticmethod
-    def hyperparameter_log_likelihood(hyperparameters, x_train, y_train, y_train_grad, jitter):
+    def hyperparameter_log_likelihood(hyperparameters, x_train, y_train, y_train_grad, jitter, kernel):
         """Log likelihood function for hyperparameters.
 
         Args:
@@ -626,7 +673,12 @@ class LogpdfGP(Model):
         #k_train_train = k_train_train + jnp.eye(k_train_train.shape[0]) * jitter
 
         if y_train_grad is None:
-            k_train_train = k_train_train + jnp.eye(k_train_train.shape[0]) * hyperparameters[-1]
+            #k_train_train = k_train_train + jnp.eye(k_train_train.shape[0]) * hyperparameters[-1]
+            k_train_train = kernel.compute_full_cov_matrix(
+                x_train, 
+                x_train, 
+                old_to_new_hyperparameters(hyperparameters),
+            )
             k_train_train = k_train_train + jnp.eye(k_train_train.shape[0]) * jitter
             v_train = jsp.linalg.solve(k_train_train, y_train, assume_a="pos")
             logdet = jnp.linalg.slogdet(k_train_train)[1]
@@ -699,6 +751,7 @@ class LogpdfGP(Model):
         log_likelihood_func,
         log_prior_func,
         prior_rate,
+        kernel
     ):
         """Log joint probability function for hyperparameters.
 
@@ -717,7 +770,7 @@ class LogpdfGP(Model):
         """
         hyperparameters = jnp.exp(transformed_hyperparameters)
         log_likelihood = log_likelihood_func(hyperparameters, x_train, y_train, y_train_grad,
-                                             jitter)
+                                             jitter, kernel)
         log_prior = log_prior_func(hyperparameters, prior_rate)
         forward_log_det = jnp.sum(transformed_hyperparameters)
         return log_likelihood + log_prior + forward_log_det
