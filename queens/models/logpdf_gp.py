@@ -240,13 +240,13 @@ class LogpdfGP(Model):
 
         if self.approx_type in ["CFBGP", "CGPMAP-II"]:
             if self.approx_type == "CFBGP":
-                eval_mean_and_std = vmap(eval_mean_and_std, in_axes=(None, 0, 0, 0))
+                eval_mean_and_std = vmap(eval_mean_and_std, in_axes=(None, 0, 0, 0, None))
                 generate_output_func = self.generate_output_cfbgp
             else:
                 generate_output_func = self.generate_output_cgpmap_2
 
-            #self.jit_func_generate_output = jit(
-            self.jit_func_generate_output = partial(
+            self.jit_func_generate_output = jit(
+                partial(
                     generate_output_func,
                     x_train=self.x_train,
                     hyperparameters=self.hyperparameters,
@@ -256,6 +256,7 @@ class LogpdfGP(Model):
                     eval_mean_and_std=eval_mean_and_std,
                     quantile=self.quantile,
                 )
+            )
 
         else:
             self.jit_func_generate_output = jit(
@@ -504,27 +505,28 @@ class LogpdfGP(Model):
             ##"scaler_y": scaler_y,
             ##"use_gradient_observatoins": use_gradient_observations,
         ##})
-        if use_gradient_observations:
-            k_test_train = rbf_by_dists(dists_test_train, hyperparameters[:-1])
-            num_test_points = dists_test_train.shape[0]
-            num_train_points = dists_test_train.shape[1]
-            num_dim = dists_test_train.shape[2]
-            length_scales = hyperparameters[:-2]
+        #if use_gradient_observations:
+            #k_test_train = rbf_by_dists(dists_test_train, hyperparameters[:-1])
+            #num_test_points = dists_test_train.shape[0]
+            #num_train_points = dists_test_train.shape[1]
+            #num_dim = dists_test_train.shape[2]
+            #length_scales = hyperparameters[:-2]
             
-            length_adjusted_dists = jnp.einsum("ijk,k->ijk", dists_test_train, 1/(length_scales**2))
-            k_test_train_grad = jnp.einsum("ij,ijk->ijk", k_test_train, length_adjusted_dists)
-            k_test_train_grad = k_test_train_grad.reshape(
-                (num_test_points, num_train_points*num_dim)
-            )
+            #length_adjusted_dists = jnp.einsum("ijk,k->ijk", dists_test_train, 1/(length_scales**2))
+            #k_test_train_grad = jnp.einsum("ij,ijk->ijk", k_test_train, length_adjusted_dists)
+            #k_test_train_grad = k_test_train_grad.reshape(
+                #(num_test_points, num_train_points*num_dim)
+            #)
 
-            k_test_train = jnp.hstack([k_test_train, k_test_train_grad])
-        else:
-            k_test_train_old = rbf_by_dists(dists_test_train, hyperparameters[:-1])
-            k_test_train = kernel.compute_val_cov_matrix(
-                x_test,
-                x_train,
-                old_to_new_hyperparameters(hyperparameters),
-            )
+            #k_test_train = jnp.hstack([k_test_train, k_test_train_grad])
+        #else:
+            #k_test_train_old = rbf_by_dists(dists_test_train, hyperparameters[:-1])
+
+        k_test_train = kernel.compute_val_cov_matrix(
+            x_test,
+            x_train,
+            old_to_new_hyperparameters(hyperparameters),
+        )
 
         k_test_test = hyperparameters[-2] ** 2
         mean = jnp.dot(k_test_train, v_train)
@@ -536,8 +538,6 @@ class LogpdfGP(Model):
         std = var ** (1 / 2)  # + 1e-30
         std = std.reshape(-1)
         mean = (mean.reshape(-1) + prior_gp_mean) * scaler_y
-
-        breakpoint()
 
         return mean, std
 
@@ -570,9 +570,14 @@ class LogpdfGP(Model):
             log_likelihood (np.ndarray): Approximation of log-likelihood values at x_test
         """
         dists_test_train = distances(x_test, x_train)
+        #eval_mean_and_std = jit(eval_mean_and_std)
         mean, std = eval_mean_and_std(
             dists_test_train, hyperparameters, v_train, chol_k_train_train, x_test
         )
+
+        jax.debug.breakpoint()
+        #jax.debug.print(f"Nan mean sum: {jnp.sum(jnp.isnan(mean))}")
+        #jax.debug.print(f"Nan std sum: {jnp.sum(jnp.isnan(std))}")
 
         erfc_arg = (mean - upper_bound) / (jnp.sqrt(2) * std)
         erfc_term = jsp.special.erfc(erfc_arg)

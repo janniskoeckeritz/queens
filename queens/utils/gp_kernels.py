@@ -49,7 +49,7 @@ def kernel_fn_rbf(x1, x2, hyperparams):
     # Compute the squared exponential kernel
     length_scale_operator = jnp.diag(1 / length_scales**2)
     square_dists = jnp.dot((x1 - x2).T, jnp.dot(length_scale_operator, (x1 - x2)))
-    return signal_std**2 * jnp.exp(-0.5 * square_dists) #+ kronecker_delta(x1, x2) * noise
+    return signal_std**2 * jnp.exp(-0.5 * square_dists)
 
 
 class AbstractKernel:
@@ -70,11 +70,31 @@ class AbstractKernel:
                                             overridden in subclasses to provide specific kernel 
                                             functionality.
     """
-    def __init__(self, kernel_fn):
+    def __init__(self, kernel_fn, use_noise=True):
         self.kernel_fn = kernel_fn
-        self.compute_full_cov_matrix = self.kernel_fn_to_full_cov_mat_fn(kernel_fn)
+        self.compute_full_cov_matrix = self.kernel_fn_to_full_cov_mat_fn(
+            self.noise_wrapper(kernel_fn)
+        )
         self.compute_val_cov_matrix = self.kernel_fn_to_val_cov_mat_fn(kernel_fn)
         self.compute_grad_cov_matrix = self.kernel_fn_to_grad_cov_mat_fn(kernel_fn)
+
+    @staticmethod
+    def noise_wrapper(func):
+        """
+        Wraps a kernel function to include noise in the covariance matrix.
+        
+        Args:
+            func (callable): The kernel function that computes the covariance between two inputs.
+        
+        Returns:
+            callable: A function that computes the covariance matrix with added noise.
+        """
+        def wrapper(*args, **kwargs):
+            result = func(*args, **kwargs)
+            noise = args[2]['noise']
+            return result + kronecker_delta(args[0], args[1]) * noise
+        return wrapper
+    
 
     @staticmethod
     def kernel_fn_to_full_cov_mat_fn(kernel_fn):
