@@ -17,6 +17,7 @@
 import logging
 import pickle
 import types
+import gc
 
 import jax
 import jax.numpy as jnp
@@ -117,17 +118,29 @@ class AdaptiveSampling(Iterator):
 
         if self.restart_file:
             results = load_result(self.restart_file)
-            self.x_train = results["x_train"][-1]
-            self.model_outputs = results["model_outputs"][-1]
-            self.y_train = results["y_train"][-1]
-            self.x_train_new = results["x_train_new"][-1]
+            self.x_train = results["x_train"]
+            self.model_outputs = results["model_outputs"]
+            self.y_train = results["y_train"]
+            self.x_train_new = results["x_train_new"]
             self.log_likelihoods = results["log_likelihoods"]
             if self.use_model_gradients:
-                self.model_gradients = results["model_gradients"][-1]
-                self.y_grad_train = results["y_gradients_train"][-1]
+                self.model_gradients = results["model_gradients"]
+                self.y_grad_train = results["y_gradients_train"]
                 self.log_likelihoods_grad = results["log_likelihoods_grad"]
 
         else:
+            #self.initial_train_iterator.pre_run()
+            #self.x_train_new = self.initial_train_iterator.samples
+            #self.x_train = np.empty((0, self.parameters.num_parameters))
+            #self.y_train = np.empty((0, 1))
+            #self.model_outputs = np.empty((0, self.likelihood_model.normal_distribution.mean.size))
+            #self.log_likelihoods = np.empty((0, 1))
+            #if self.use_model_gradients:
+                #self.y_grad_train = np.empty((0, self.parameters.num_parameters))
+                #self.model_gradients = np.empty((0, 
+                                                #self.likelihood_model.normal_distribution.mean.size,
+                                                #self.parameters.num_parameters))
+                #self.log_likelihoods_grad = np.empty((0, self.parameters.num_parameters))
             self.initial_train_iterator.pre_run()
             self.x_train_new = self.initial_train_iterator.samples
             self.x_train = np.empty((0, self.parameters.num_parameters))
@@ -176,6 +189,11 @@ class AdaptiveSampling(Iterator):
 
             if cs_div < self.cs_div_criterion:
                 break
+        
+            jax.clear_backends()    # Clear JAX device memory
+            jax.clear_caches()      # Clear compilation cache  
+            gc.collect()            # Force Python garbage collection
+
 
     def eval_log_likelihood(self):
         """Evaluate log likelihood.
@@ -197,7 +215,6 @@ class AdaptiveSampling(Iterator):
         #log_likelihood = self.likelihood_model.normal_distribution.logpdf(self.model_outputs)
         #log_likelihood -= self.likelihood_model.normal_distribution.logpdf_const
         #log_likelihood = log_likelihood.reshape((-1, 1))
-        #breakpoint()
 
         #if self.use_model_gradients:
             #log_likelihood_grad = np.einsum("bi,bij->bj",
@@ -272,8 +289,8 @@ class AdaptiveSampling(Iterator):
         if iteration == 0 and not self.restart_file:
             results = {
                 "x_train": [],
-                "model_outputs": [],
-                "y_train": [],
+                #"model_outputs": [],
+                #"y_train": [],
                 "x_train_new": [],
                 "particles": [],
                 "weights": [],
@@ -282,14 +299,16 @@ class AdaptiveSampling(Iterator):
                 "log_likelihoods": [],
             }
             if self.use_model_gradients:
-                results["model_gradients"] = []
-                results["y_train_grad"] = []
+                #results["model_gradients"] = []
+                #results["y_train_grad"] = []
                 results["log_likelihoods_grad"] = []
             cs_div = np.nan
         else:
             results = load_result(result_file)
             particles_prev = results["particles"][-1]
             weights_prev = results["weights"][-1]
+            #particles_prev = results["particles"]
+            #weights_prev = results["weights"]
             samples_prev = particles_prev[
                 np.random.choice(np.arange(weights_prev.size), 5_000, p=weights_prev)
             ]
@@ -297,19 +316,29 @@ class AdaptiveSampling(Iterator):
             cs_div = float(cauchy_schwarz_divergence(samples_prev, samples_curr))
             _logger.info("Cauchy Schwarz divergence: %.2e", cs_div)
 
-        results["x_train"].append(self.x_train)
-        results["model_outputs"].append(self.model_outputs)
-        results["y_train"].append(self.y_train)
-        results["x_train_new"].append(self.x_train_new)
+        #results["x_train"].append(self.x_train)
+        #results["model_outputs"].append(self.model_outputs)
+        #results["y_train"].append(self.y_train)
+        #results["x_train_new"].append(self.x_train_new)
         results["particles"].append(particles)
         results["weights"].append(weights)
-        results["log_posterior"].append(log_posterior)
+        #results["log_posterior"].append(log_posterior)
+        #results["cs_div"].append(cs_div)
+        #results["log_likelihoods"].append(self.log_likelihoods)
+
+        results["x_train"] = self.x_train
+        #results["model_outputs"] = self.model_outputs
+        #results["y_train"] = self.y_train
+        results["x_train_new"] = self.x_train_new
+        #results["particles"] = particles
+        #results["weights"] = weights
+        results["log_posterior"] = log_posterior
         results["cs_div"].append(cs_div)
-        results["log_likelihoods"].append(self.log_likelihoods)
+        results["log_likelihoods"] = self.log_likelihoods
         if self.use_model_gradients:
-            results["model_gradients"].append(self.model_gradients)
-            results["y_train_grad"].append(self.y_grad_train)
-            results["log_likelihoods_grad"].append(self.log_likelihoods_grad)
+            #results["model_gradients"] = self.model_gradients
+            #results["y_train_grad"] = self.y_grad_train
+            results["log_likelihoods_grad"] = self.log_likelihoods_grad
 
         with open(result_file, "wb") as handle:
             pickle.dump(results, handle, protocol=pickle.HIGHEST_PROTOCOL)

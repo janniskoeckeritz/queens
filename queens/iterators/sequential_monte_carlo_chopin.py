@@ -204,7 +204,8 @@ class SequentialMonteCarloChopin(Iterator):
             verbose=False,
             collect=[col.Moments()],
             resampling=self.resampling_method,
-            qmc=False,  # QMC can not be used in this static setting in particles (currently)
+            qmc=False,  # QMC can not be used in this static setting in particles (currently),
+            store_history=False
         )
 
     def core_run(self):

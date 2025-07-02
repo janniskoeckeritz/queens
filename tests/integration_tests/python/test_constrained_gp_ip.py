@@ -121,7 +121,7 @@ def test_constrained_gp_ip_park(
         prior_rate=[1.0e-1, 10.0, 1.0e8],
         prior_gp_mean=-1.0,
         quantile=quantile,
-        jitter=1.0e-16,
+        jitter=1.0e-14,
     )
 
     initial_train_iterator = MonteCarlo(

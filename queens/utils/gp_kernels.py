@@ -146,7 +146,7 @@ class Kernel(AbstractKernel):
     """Kernel class for any kernel without gradient information."""
     use_gradients = False
 
-    def __init__(self, kernel_fn):
+    def __init__(self, kernel_fn, use_noise=True):
         """
         Initializes the Kernel class with a kernel function.
         
@@ -156,7 +156,7 @@ class Kernel(AbstractKernel):
         """
         self.kernel_fn_to_val_cov_mat_fn = self.kernel_fn_to_full_cov_mat_fn
         self.kernel_fn_to_grad_cov_mat_fn = lambda func: not_yet_implemented
-        super().__init__(kernel_fn)
+        super().__init__(kernel_fn, use_noise)
 
     @staticmethod
     def kernel_fn_to_full_cov_mat_fn(kernel_fn):
@@ -178,6 +178,17 @@ class Kernel(AbstractKernel):
 class GradKernel(AbstractKernel):
     """Gradient Kernel class for kernels with gradient information."""
     use_gradients = True
+
+    def __init__(self, kernel_fn, use_noise=True):
+        """
+        Initializes the GradKernel class with a kernel function.
+        
+        Args:
+            kernel_fn (callable): The kernel function that computes the covariance between two 
+                                  inputs.
+        """
+        self.kernel_fn_to_grad_cov_mat_fn = lambda func: not_yet_implemented
+        super().__init__(kernel_fn, use_noise)
 
     @staticmethod
     def kernel_fn_to_full_cov_mat_fn(kernel_fn):
@@ -208,7 +219,7 @@ class GradKernel(AbstractKernel):
         cov_grad_cov = jax.jacobian(cov_grad_cov, argnums=1)
         cov_grad_cov = flatten_tail(jax.vmap(cov_grad_cov, in_axes=(None, 0, None), out_axes=-2))
 
-        def covariance_mat_with_grad(x1_batch, x2_batch, hypers):
+        def covariance_mat_from_grad(x1_batch, x2_batch, hypers):
             """
             Computes the Gram matrix and its gradients for the given inputs and hyperparameters.
 
@@ -232,7 +243,45 @@ class GradKernel(AbstractKernel):
 
             return cov_mat
 
-        return jax.jit(covariance_mat_with_grad)
+        return jax.jit(covariance_mat_from_grad)
+
+    def kernel_fn_to_val_cov_mat_fn(self, kernel_fn):
+        """
+        Converts a kernel function to a covariance matrix computation function for value evaluation.
+        
+        Args:
+            kernel_fn (callable): The kernel function that computes the covariance between two 
+                                  inputs.
+        
+        Returns:
+            callable: A function that computes the covariance matrix for value evaluation.
+        """
+        cov = jax.vmap(kernel_fn, in_axes=(0, None, None), out_axes=0)
+        cov = jax.vmap(cov, in_axes=(None, 0, None), out_axes=-1)
+
+        cov_grad = jax.grad(kernel_fn, argnums=1)
+        cov_grad = flatten_output(jax.vmap(cov_grad, in_axes=(None, 0, None), out_axes=0))
+        cov_grad = jax.vmap(cov_grad, in_axes=(0, None, None), out_axes=0)
+
+        def covariance_val_mat_from_grad(x1_batch, x2_batch, hypers):
+            """
+            Computes the Gram matrix for value evaluation using gradient information.
+
+            Args:
+                x1_batch (jnp.ndarray): First input array.
+                x2_batch (jnp.ndarray): Second input array.
+                hypers (dict): Hyperparameters for the kernel function.
+
+            Returns:
+                jnp.ndarray: The computed covariance matrix for value evaluation.
+            """
+            mat11 = cov(x1_batch, x2_batch, hypers)
+            mat12 = cov_grad(x1_batch, x2_batch, hypers)
+
+            cov_mat = jnp.hstack([mat11, mat12])
+            return cov_mat
+
+        return jax.jit(covariance_val_mat_from_grad)
 
 
 def main():
