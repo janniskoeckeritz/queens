@@ -678,6 +678,65 @@ def squared_exponential_grad_grad():
     """Compute the squared exponential kernel for gradient evaluations."""
     raise NotImplementedError("This method should be implemented in a subclass.")
 
+class RbfKernel(AbstractKernel):
+    """RBF Kernel Class.
+
+    This class implements the RBF kernel for point-point and point-gradient evaluations.
+    """
+
+    @staticmethod
+    def gram(points, hyperparameters):
+        """Compute the Gram matrix for RBF kernel."""
+        num_points = points.shape[0]
+        gram_mat = squared_exponential_point_point(points, points, hyperparameters)
+        gram_mat += jnp.eye(num_points) * hyperparameters[-1]  # Add noise term
+        return gram_mat
+
+
+    @staticmethod
+    def cross(points1, points2, hyperparameters):
+        """Compute the cross-covariance matrix for RBF kernel."""
+        return squared_exponential_point_point(points1, points2, hyperparameters)
+
+    @staticmethod
+    def cross_gradient(points1, points2, hyperparameters):
+        """Compute the cross-covariance matrix for gradient evaluations."""
+        return squared_exponential_grad_point(points1, points2, hyperparameters)
+
+
+def flatten_output(func):
+    """Takes a function and returns a new function that flattens the output."""
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        return jnp.ravel(result)
+    return wrapper
+
+def flatten_tail(func):
+    """Takes a function and returns a new function that flattens all but the first axes of the output."""
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        return jnp.reshape(result, (result.shape[0], -1))
+    return wrapper
+
+def kronecker_delta(x1, x2):
+    """Kronecker delta function."""
+    return jnp.where(jnp.all(x1 == x2, axis=-1), 1.0, 0.0)
+
+def noise_wrapper(func):
+    """
+    Wraps a kernel function to include noise in the covariance matrix.
+    
+    Args:
+        func (callable): The kernel function that computes the covariance between two inputs.
+    
+    Returns:
+        callable: A function that computes the covariance matrix with added noise.
+    """
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        noise = args[2][-1]
+        return result + kronecker_delta(args[0], args[1]) * noise
+    return wrapper
 
 class JaxGeneralKernel(AbstractKernel):
     """JaxGeneralKernel Class.
@@ -691,11 +750,16 @@ class JaxGeneralKernel(AbstractKernel):
         Args:
             kernel_fn (callable): Function to compute the kernel matrix.
         """
-        self.kernel_fn = kernel_fn
+        noisy_kernel_fn = noise_wrapper(kernel_fn)
     
-        # gram function
-        gram = jax.vmap(kernel_fn, in_axes=(0, None, None), out_axes=0)
-        self.gram = jax.jit(jax.vmap(gram, in_axes=(None, 0, None), out_axes=-1))
+        # gram matrix function
+        gram = jax.vmap(noisy_kernel_fn, in_axes=(0, None, None), out_axes=0)
+        gram = jax.jit(jax.vmap(gram, in_axes=(None, 0, None), out_axes=-1))
+        self.gram = lambda points, hypers: gram(points, points, hypers)
+
+        # cross covariance function
+        cross = jax.vmap(kernel_fn, in_axes=(0, None, None), out_axes=0)
+        self.cross = jax.jit(jax.vmap(cross, in_axes=(None, 0, None), out_axes=-1))
 
     @staticmethod
     def cross(points1, points2, hyperparameters):
