@@ -17,6 +17,7 @@
 import logging
 import time
 from functools import partial
+from abc import ABC, abstractmethod
 
 import jax
 import jax.numpy as jnp
@@ -124,10 +125,12 @@ class LogpdfGP(Model):
         self.jit_func_generate_output = None
         self.partial_hyperparameter_log_prob = None
         self.batch_size = int(4e8)
+        self.kernel = kernel
+        self.use_grad_obs = kernel.use_grad_obs
 
         super().__init__()
 
-    def initialize(self, x_train, y_train, num_observations):
+    def initialize(self, x_train, y_train_val, num_observations, y_train_grad=None):
         """Initialize Gaussian process model.
 
         Args:
@@ -628,25 +631,28 @@ def rbf(x1, x2, hyperparameters):
     return k_x1_x2
 
 
-class AbstractKernel:
+class AbstractKernel(ABC):
     """Abstract Kernel class."""
-
-    #def __init__(self, *args, **kwargs):
-        #"""Initialize AbstractKernel."""
-        #raise NotImplementedError("This is an abstract class and cannot be instantiated.")
+    @property
+    @abstractmethod
+    def use_grad_obs(self):
+        """Must be implemented in a subclass to return true or false."""
+        pass
 
     @staticmethod
-    def gram():
+    @abstractmethod
+    def gram(points, hyperparameters):
         """Compute the Gram matrix."""
         raise NotImplementedError("This method should be implemented in a subclass.")
 
     @staticmethod
-    def cross():
+    @abstractmethod
+    def cross(points1, points2, hyperparameters):
         """Compute the cross-covariance matrix."""
         raise NotImplementedError("This method should be implemented in a subclass.")
 
     @staticmethod
-    def cross_gradient():
+    def cross_gradient(points1, points2, hyperparameters):
         """Compute the cross-covariance matrix for gradient evaluations."""
         raise NotImplementedError("This method should be implemented in a subclass.")
 
@@ -683,6 +689,10 @@ class RbfKernel(AbstractKernel):
 
     This class implements the RBF kernel for point-point and point-gradient evaluations.
     """
+    @property
+    def use_grad_obs(self):
+        """Set whether to use gradient observations."""
+        return False
 
     @staticmethod
     def gram(points, hyperparameters):
@@ -691,7 +701,6 @@ class RbfKernel(AbstractKernel):
         gram_mat = squared_exponential_point_point(points, points, hyperparameters)
         gram_mat += jnp.eye(num_points) * hyperparameters[-1]  # Add noise term
         return gram_mat
-
 
     @staticmethod
     def cross(points1, points2, hyperparameters):
@@ -743,6 +752,10 @@ class JaxGeneralKernel(AbstractKernel):
 
     This class implements a general kernel using JAX for point-point and point-gradient evaluations.
     """
+    @property
+    def use_grad_obs(self):
+        """Set whether to use gradient observations."""
+        return False
 
     def __init__(self, kernel_fn):
         """Initialize JaxGeneralKernel.
@@ -760,6 +773,12 @@ class JaxGeneralKernel(AbstractKernel):
         # cross covariance function
         cross = jax.vmap(kernel_fn, in_axes=(0, None, None), out_axes=0)
         self.cross = jax.jit(jax.vmap(cross, in_axes=(None, 0, None), out_axes=-1))
+    
+    @staticmethod
+    def gram(points, hyperparameters):
+        """Compute the Gram matrix."""
+        raise NotImplementedError(
+            "This method is ovewritten in the constructor of JaxGeneralKernel.")
 
     @staticmethod
     def cross(points1, points2, hyperparameters):
