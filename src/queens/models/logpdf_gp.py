@@ -144,7 +144,10 @@ class LogpdfGP(Model):
         self.num_dim = x_train.shape[1]
         self.scaler_x, self.x_train = init_scaler(x_train)
         self.scaler_y = np.max(np.abs(y_train_val))
-        self.y_train = y_train_val / self.scaler_y - self.prior_gp_mean
+        if not self.use_grad_obs:
+            self.y_train = y_train_val / self.scaler_y - self.prior_gp_mean
+        else:
+            raise NotImplementedError("Gradient observations are not implemented yet.")
         if self.upper_bound is None:
             self.upper_bound = -0.5 * stats.chi2(num_observations).ppf(0.05)
         self.upper_bound = np.array(max(y_train_val.max(), self.upper_bound))
@@ -165,10 +168,11 @@ class LogpdfGP(Model):
                 log_likelihood_func=self.hyperparameter_log_likelihood,
                 log_prior_func=self.hyperparameter_log_prior,
                 prior_rate=self.prior_rate,
+                kernel=self.kernel
             )
         )
         if self.approx_type == "CFBGP":
-            self.batch_size = int(4e8 / (y_train.size * self.num_dim * self.num_hyper))
+            self.batch_size = int(4e8 / (self.y_train.size * self.num_dim * self.num_hyper))
             with jax.default_device(jax.devices("cpu")[0]):
                 hyperparameters = self.sample_hyperparameters()
             _logger.info(
@@ -195,8 +199,10 @@ class LogpdfGP(Model):
 
         eval_mean_and_std = partial(
             self.evaluate_mean_and_std,
+            x_train=self.x_train,
             prior_gp_mean=self.prior_gp_mean,
             scaler_y=self.scaler_y,
+            kernel=self.kernel
         )
 
         if self.approx_type in ["CFBGP", "CGPMAP-II"]:
@@ -228,6 +234,7 @@ class LogpdfGP(Model):
                     v_train=self.v_train,
                     prior_gp_mean=self.prior_gp_mean,
                     scaler_y=self.scaler_y,
+                    kernel=self.kernel,
                 )
             )
 
@@ -243,8 +250,10 @@ class LogpdfGP(Model):
             v_train (np.ndarray): Matrix product of inverse of Gram matrix evaluated at training
                                   samples and training output samples
         """
-        k_train_train = rbf(self.x_train, self.x_train, hyperparameters[:-1])
-        k_train_train += jnp.eye(k_train_train.shape[0]) * hyperparameters[-1]
+        #k_train_train = rbf(self.x_train, self.x_train, hyperparameters[:-1])
+        #k_train_train += jnp.eye(k_train_train.shape[0]) * hyperparameters[-1]
+        #k_train_train = k_train_train + jnp.eye(k_train_train.shape[0]) * self.jitter
+        k_train_train = self.kernel.gram(self.x_train, hyperparameters)
         k_train_train = k_train_train + jnp.eye(k_train_train.shape[0]) * self.jitter
         chol_k_train_train = safe_cholesky(k_train_train, hyperparameters[-1])
         v_train = jnp.linalg.solve(
@@ -362,12 +371,14 @@ class LogpdfGP(Model):
 
     @staticmethod
     def evaluate_mean_and_std(
-        dists_test_train,
+        x_test,
         hyperparameters,
         v_train,
         chol_k_train_train,
+        x_train,
         prior_gp_mean,
         scaler_y,
+        kernel,
     ):
         """Mean and standard deviation of unconstrained GP at test samples.
 
@@ -385,7 +396,8 @@ class LogpdfGP(Model):
             mean (np.ndarray): Mean of unconstrained GP at test samples
             std (np.ndarray): Standard deviation of unconstrained GP at test samples.
         """
-        k_test_train = rbf_by_dists(dists_test_train, hyperparameters[:-1])
+        #k_test_train = rbf_by_dists(dists_test_train, hyperparameters[:-1])
+        k_test_train = kernel.cross(x_test, x_train, hyperparameters)
         k_test_test = hyperparameters[-2] ** 2
         mean = jnp.dot(k_test_train, v_train)
         var = k_test_test - jnp.sum(
@@ -426,9 +438,9 @@ class LogpdfGP(Model):
         Returns:
             log_likelihood (np.ndarray): Approximation of log-likelihood values at x_test
         """
-        dists_test_train = distances(x_test, x_train)
+        #dists_test_train = distances(x_test, x_train)
         mean, std = eval_mean_and_std(
-            dists_test_train, hyperparameters, v_train, chol_k_train_train
+            x_test, hyperparameters, v_train, chol_k_train_train
         )
 
         erfc_arg = (mean - upper_bound) / (jnp.sqrt(2) * std)
@@ -468,9 +480,9 @@ class LogpdfGP(Model):
         Returns:
             log_likelihood (np.ndarray): Approximation of log-likelihood values at x_test
         """
-        dists_test_train = distances(x_test, x_train)
+        #dists_test_train = distances(x_test, x_train)
         mean, std = eval_mean_and_std(
-            dists_test_train, hyperparameters, v_train, chol_k_train_train
+            x_test, hyperparameters, v_train, chol_k_train_train
         )
         mean = mean.reshape(-1, x_test.shape[0])
         std = std.reshape(-1, x_test.shape[0])
@@ -491,7 +503,8 @@ class LogpdfGP(Model):
         return log_likelihood
 
     @staticmethod
-    def generate_output_gpmap_1(x_test, x_train, hyperparameters, v_train, prior_gp_mean, scaler_y):
+    def generate_output_gpmap_1(
+        x_test, x_train, hyperparameters, v_train, prior_gp_mean, scaler_y, kernel):
         """Approximation of log-likelihood using CGPMAP-II approach.
 
         Args:
@@ -506,12 +519,13 @@ class LogpdfGP(Model):
         Returns:
             log_likelihood (np.ndarray): Approximation of log-likelihood values at x_test
         """
-        k_test_train = rbf(x_test, x_train, hyperparameters[:-1])
+        #k_test_train = rbf(x_test, x_train, hyperparameters[:-1])
+        k_test_train = kernel.cross(x_test, x_train, hyperparameters)
         log_likelihood = (jnp.dot(k_test_train, v_train).reshape(-1) + prior_gp_mean) * scaler_y
         return log_likelihood
 
     @staticmethod
-    def hyperparameter_log_likelihood(hyperparameters, x_train, y_train, jitter):
+    def hyperparameter_log_likelihood(hyperparameters, x_train, y_train, jitter, kernel):
         """Log likelihood function for hyperparameters.
 
         Args:
@@ -523,8 +537,9 @@ class LogpdfGP(Model):
         Returns:
             log_likelihood (np.ndarray): Log likelihood of data given hyperparameters
         """
-        k_train_train = rbf(x_train, x_train, hyperparameters[:-1])
-        k_train_train = k_train_train + jnp.eye(k_train_train.shape[0]) * hyperparameters[-1]
+        #k_train_train = rbf(x_train, x_train, hyperparameters[:-1])
+        #k_train_train = k_train_train + jnp.eye(k_train_train.shape[0]) * hyperparameters[-1]
+        k_train_train = kernel.gram(x_train, hyperparameters)
         k_train_train = k_train_train + jnp.eye(k_train_train.shape[0]) * jitter
         v_train = jsp.linalg.solve(k_train_train, y_train, assume_a="pos")
         logdet = jnp.linalg.slogdet(k_train_train)[1]
@@ -560,6 +575,7 @@ class LogpdfGP(Model):
         log_likelihood_func,
         log_prior_func,
         prior_rate,
+        kernel,
     ):
         """Log joint probability function for hyperparameters.
 
@@ -577,7 +593,7 @@ class LogpdfGP(Model):
             np.ndarray: Log joint probability of hyperparameters
         """
         hyperparameters = jnp.exp(transformed_hyperparameters)
-        log_likelihood = log_likelihood_func(hyperparameters, x_train, y_train, jitter)
+        log_likelihood = log_likelihood_func(hyperparameters, x_train, y_train, jitter, kernel)
         log_prior = log_prior_func(hyperparameters, prior_rate)
         forward_log_det = jnp.sum(transformed_hyperparameters)
         return log_likelihood + log_prior + forward_log_det
