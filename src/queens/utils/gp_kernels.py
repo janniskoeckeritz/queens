@@ -61,14 +61,43 @@ def squared_exponential_grad_point(points1, points2, hyperparameters):
     k_x1_x2 = squared_exponential_point_point(points1, points2, hyperparameters)
 
     length_adjusted_dists = jnp.einsum("ijk,k->ijk", dists, 1/(lengthscales**2))
-    k_x1_x2_grad = jnp.einsum("ij,ijk->ijk", k_x1_x2, length_adjusted_dists)
+    k_x1_x2_grad = jnp.einsum("ij,ijk->ijk", -k_x1_x2, length_adjusted_dists)
     k_x1_x2_grad = k_x1_x2_grad.reshape((-1, points2.shape[0]))
 
     return k_x1_x2_grad
 
-def squared_exponential_grad_grad():
+def squared_exponential_grad_grad(points1, points2, hyperparameters):
     """Compute the squared exponential kernel for gradient evaluations."""
-    raise NotImplementedError("This method should be implemented in a subclass.")
+    lengthscales = hyperparameters[:-2]
+
+    dists = distances(points1, points2)
+    length_adjusted_dists = jnp.einsum("ijk,k->ijk", dists, 1/(lengthscales**2))
+    k_x1_x2 = squared_exponential_point_point(points1, points2, hyperparameters)
+    num_dim = points1.shape[1]
+
+    k_grad_x1_x2_grad = jnp.einsum(
+        "ij,kl->ijkl", 
+        jnp.ones((points1.shape[0], points2.shape[0])),
+        jnp.diag(1/(lengthscales**2)),
+    )
+
+    k_grad_x1_x2_grad -= jnp.einsum(
+        "ijk,ijl->ijkl",
+        length_adjusted_dists,
+        length_adjusted_dists,
+    )
+    k_grad_x1_x2_grad = jnp.einsum(
+        "ijkl,ij->ijkl",
+        k_grad_x1_x2_grad,
+        k_x1_x2,
+    )
+
+    k_grad_x1_x2_grad = k_grad_x1_x2_grad.transpose((0,2,1,3))
+    k_grad_x1_x2_grad = k_grad_x1_x2_grad.reshape(
+        (num_dim*points1.shape[0], num_dim*points2.shape[0])
+    )
+    
+    return k_grad_x1_x2_grad
 
 class RbfKernel(AbstractKernel):
     """RBF Kernel Class.
@@ -97,6 +126,46 @@ class RbfKernel(AbstractKernel):
     def cross_gradient(points1, points2, hyperparameters):
         """Compute the cross-covariance matrix for gradient evaluations."""
         return squared_exponential_grad_point(points1, points2, hyperparameters)
+
+
+class RbfGradKernel(AbstractKernel):
+    """RBF Gradient Kernel Class.
+
+    This class implements the RBF kernel for point-point and point-gradient evaluations.
+    """
+    @property
+    def use_grad_obs(self):
+        """Set whether to use gradient observations."""
+        return True
+
+    @staticmethod
+    def gram(points, hyperparameters):
+        """Compute the Gram matrix for RBF kernel with gradients."""
+        num_points = points.shape[0]
+        val_grad_val = squared_exponential_point_point(points, points, hyperparameters)
+        val_grad_val += jnp.eye(num_points) * hyperparameters[-1]  # Add noise term
+        grad_gram_val = squared_exponential_grad_point(points, points, hyperparameters)
+        grad_gram_grad = squared_exponential_grad_grad(points, points, hyperparameters)
+
+        # Assemble the full Gram matrix
+        gram_mat = jnp.vstack([
+            jnp.hstack([val_grad_val, grad_gram_val.T]),
+            jnp.hstack([grad_gram_val, grad_gram_grad])
+        ])
+        
+        return gram_mat
+
+    @staticmethod
+    def cross(points1, points2, hyperparameters):
+        """Compute the cross-covariance matrix for RBF kernel with gradients."""
+        raise NotImplementedError(
+            "Cross-covariance for RBFGradKernel is not implemented. ")
+
+    @staticmethod
+    def cross_gradient(points1, points2, hyperparameters):
+        """Compute the cross-covariance matrix for gradient evaluations."""
+        raise NotImplementedError(
+            "Cross-covariance for RBFGradKernel is not implemented. ")
 
 
 def flatten_output(func):
@@ -133,50 +202,6 @@ def noise_wrapper(func):
         return result + kronecker_delta(args[0], args[1]) * noise
     return wrapper
 
-class JaxGeneralKernel(AbstractKernel):
-    """JaxGeneralKernel Class.
-
-    This class implements a general kernel using JAX for point-point and point-gradient evaluations.
-    """
-    @property
-    def use_grad_obs(self):
-        """Set whether to use gradient observations."""
-        return False
-
-    def __init__(self, kernel_fn):
-        """Initialize JaxGeneralKernel.
-
-        Args:
-            kernel_fn (callable): Function to compute the kernel matrix.
-        """
-        noisy_kernel_fn = noise_wrapper(kernel_fn)
-    
-        # gram matrix function
-        gram = jax.vmap(noisy_kernel_fn, in_axes=(0, None, None), out_axes=0)
-        gram = jax.jit(jax.vmap(gram, in_axes=(None, 0, None), out_axes=-1))
-        self.gram = lambda points, hypers: gram(points, points, hypers)
-
-        # cross covariance function
-        cross = jax.vmap(kernel_fn, in_axes=(0, None, None), out_axes=0)
-        self.cross = jax.jit(jax.vmap(cross, in_axes=(None, 0, None), out_axes=-1))
-    
-    @staticmethod
-    def gram(points, hyperparameters):
-        """Compute the Gram matrix."""
-        raise NotImplementedError(
-            "This method is ovewritten in the constructor of JaxGeneralKernel.")
-
-    @staticmethod
-    def cross(points1, points2, hyperparameters):
-        """Compute the cross-covariance matrix."""
-        raise NotImplementedError("This method should be implemented in a subclass.")
-
-    @staticmethod
-    def cross_gradient(points1, points2, hyperparameters):
-        """Compute the cross-covariance matrix for gradient evaluations."""
-        raise NotImplementedError("This method should be implemented in a subclass.")
-
-
 def jax_kernel_fn_rbf(x1, x2, hyperparams):
     """
     A simple kernel function that computes the squared exponential kernel.
@@ -201,3 +226,120 @@ def jax_kernel_fn_rbf(x1, x2, hyperparams):
     length_scale_operator = jnp.diag(1 / length_scales**2)
     square_dists = jnp.dot((x1 - x2).T, jnp.dot(length_scale_operator, (x1 - x2)))
     return signal_std**2 * jnp.exp(-0.5 * square_dists)
+
+
+class JaxGeneralKernel(AbstractKernel):
+    """JaxGeneralKernel Class.
+
+    This class implements a general kernel using JAX for point-point and point-gradient evaluations.
+    """
+    @property
+    def use_grad_obs(self):
+        """Set whether to use gradient observations."""
+        return False
+
+    def __init__(self, kernel_fn):
+        """Initialize JaxGeneralKernel.
+
+        Args:
+            kernel_fn (callable): Function to compute the kernel matrix.
+        """
+        noisy_kernel_fn = noise_wrapper(kernel_fn)
+
+        # gram matrix function
+        gram = jax.vmap(noisy_kernel_fn, in_axes=(0, None, None), out_axes=0)
+        gram = jax.jit(jax.vmap(gram, in_axes=(None, 0, None), out_axes=-1))
+        self.gram = lambda points, hypers: gram(points, points, hypers)
+
+        # cross covariance function
+        cross = jax.vmap(kernel_fn, in_axes=(0, None, None), out_axes=0)
+        self.cross = jax.jit(jax.vmap(cross, in_axes=(None, 0, None), out_axes=-1))
+
+    @staticmethod
+    def gram(points, hyperparameters):
+        """Compute the Gram matrix."""
+        raise NotImplementedError(
+            "This method is ovewritten in the constructor of JaxGeneralKernel.")
+
+    @staticmethod
+    def cross(points1, points2, hyperparameters):
+        """Compute the cross-covariance matrix."""
+        raise NotImplementedError("This method should be implemented in a subclass.")
+
+    @staticmethod
+    def cross_gradient(points1, points2, hyperparameters):
+        """Compute the cross-covariance matrix for gradient evaluations."""
+        raise NotImplementedError("This method should be implemented in a subclass.")
+
+
+class JaxGeneralGradKernel(AbstractKernel):
+    """JaxGeneralGradKernel Class.
+
+    This class implements a general kernel using JAX for point-point and point-gradient evaluations.
+    """
+    @property
+    def use_grad_obs(self):
+        """Set whether to use gradient observations."""
+        return True
+
+    def __init__(self, kernel_fn):
+        """Initialize JaxGeneralGradKernel.
+
+        Args:
+            kernel_fn (callable): Function to compute the kernel matrix.
+        """
+        noisy_kernel_fn = noise_wrapper(kernel_fn)
+    
+        gram_components = self.assemble_kernel_components(noisy_kernel_fn)
+        val_gram_val, grad_gram_val, grad_gram_grad = gram_components
+
+        #cov_components = self.assemble_kernel_components(kernel_fn)
+        #val_cov_val, grad_cov_val, grad_cov_grad = cov_components
+
+        def gram(points, hypers):
+            """Compute the Gram matrix."""
+            val_gram_val_mat = val_gram_val(points, points, hypers)
+            grad_gram_val_mat = grad_gram_val(points, points, hypers)
+            grad_gram_grad_mat = grad_gram_grad(points, points, hypers)
+
+            gram_mat = jnp.vstack([
+                jnp.hstack([val_gram_val_mat, grad_gram_val_mat.T]),
+                jnp.hstack([grad_gram_val_mat, grad_gram_grad_mat])
+            ])
+
+            return gram_mat
+        
+        self.gram = jax.jit(gram)
+    
+    @staticmethod
+    def gram(points, hyperparameters):
+        """Compute the Gram matrix."""
+        raise NotImplementedError(
+            "This method is overwritten in the constructor of JaxGeneralGradKernel.")
+    
+    @staticmethod
+    def cross(points1, points2, hyperparameters):
+        """Compute the cross-covariance matrix."""
+        raise NotImplementedError(
+            "This method is overwritten in the constructor of JaxGeneralGradKernel.")
+
+    
+    def assemble_kernel_components(self, kernel_fn):
+        """Assemble kernel components for variance and gradients."""
+        variance = jax.vmap(kernel_fn, in_axes=(0, None, None), out_axes=0)
+        variance = jax.vmap(variance, in_axes=(None, 0, None), out_axes=-1)
+
+        grad_variance = jax.grad(kernel_fn, argnums=0)
+        grad_variance = flatten_output(jax.vmap(grad_variance, in_axes=(0, None, None), out_axes=0))
+        grad_variance = jax.vmap(grad_variance, in_axes=(None, 0, None), out_axes=-1)
+
+        grad_variance_grad = jax.grad(kernel_fn, argnums=0)
+        grad_variance_grad = flatten_output(
+            jax.vmap(grad_variance_grad, in_axes=(0, None, None), out_axes=0)
+        )
+        grad_variance_grad = jax.jacobian(grad_variance_grad, argnums=1)
+        grad_variance_grad = flatten_tail(
+            jax.vmap(grad_variance_grad, in_axes=(None, 0, None), out_axes=-2)
+        )
+
+        return variance, grad_variance, grad_variance_grad
