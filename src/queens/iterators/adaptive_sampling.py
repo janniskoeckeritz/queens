@@ -26,6 +26,7 @@ from jax import jit
 from queens.iterators._iterator import Iterator
 from queens.iterators.sequential_monte_carlo_chopin import SequentialMonteCarloChopin
 from queens.utils.io import load_result
+from queens.models.logpdf_gp import LogpdfGP
 
 _logger = logging.getLogger(__name__)
 jax.config.update("jax_enable_x64", True)
@@ -88,11 +89,20 @@ class AdaptiveSampling(Iterator):
         self.num_steps = num_steps
         self.restart_file = restart_file
         self.cs_div_criterion = cs_div_criterion
+        self.num_dim = initial_train_samples.shape[1]
+
+        self.use_grad_obs = False
+        if isinstance(likelihood_model, LogpdfGP):
+            self.use_grad_obs = likelihood_model.use_grad_obs
 
         self.x_train_new = initial_train_samples
         self.x_train = np.empty((0, self.parameters.num_parameters))
         self.y_train = np.empty((0, 1))
         self.model_outputs = np.empty((0, self.likelihood_model.y_obs.size))
+        self.log_likelihoods = np.empty((0, 1))
+        self.y_train_grad = np.empty((0, self.num_dim))
+        self.model_gradients = np.empty((0, self.likelihood_model.y_obs.size*self.num_dim))
+        self.log_likelihoods_grad = np.empty((0, self.num_dim))
 
     def pre_run(self):
         """Pre run."""
@@ -104,15 +114,26 @@ class AdaptiveSampling(Iterator):
             self.model_outputs = results["model_outputs"][-1]
             self.y_train = results["y_train"][-1]
             self.x_train_new = results["x_train_new"][-1]
+            if self.use_grad_obs:
+                self.y_train_grad = results["y_train_grad"][-1]
+                self.model_gradients = results["model_gradients"][-1]
 
     def core_run(self):
         """Core run."""
         for i in range(self.num_steps):
             _logger.info("Step: %i / %i", i + 1, self.num_steps)
             self.x_train = np.concatenate([self.x_train, self.x_train_new], axis=0)
-            self.y_train = self.eval_log_likelihood().reshape(-1, 1)
+
+            # self.y_train_grad is empty if use_grad_obs is False
+            self.y_train, self.y_train_grad = self.eval_log_likelihood()
+
             _logger.info("Number of solver evaluations: %i", self.x_train.shape[0])
-            self.model.initialize(self.x_train, self.y_train, self.likelihood_model.y_obs.size)
+            self.model.initialize(
+                self.x_train,
+                self.y_train,
+                self.likelihood_model.y_obs.size,
+                self.y_train_grad,
+            )
 
             random_state = np.random.get_state()
             self.solving_iterator.pre_run()  # We don't want that the random seed is set here.
@@ -150,13 +171,33 @@ class AdaptiveSampling(Iterator):
         Returns:
             log_likelihood (np.ndarray): Log likelihood
         """
-        model_output = self.likelihood_model.forward_model.evaluate(self.x_train_new)["result"]
-        self.model_outputs = np.concatenate([self.model_outputs, model_output], axis=0)
-        if self.likelihood_model.noise_type.startswith("MAP"):
-            self.likelihood_model.update_covariance(model_output)
-        log_likelihood = self.likelihood_model.normal_distribution.logpdf(self.model_outputs)
-        log_likelihood -= self.likelihood_model.normal_distribution.logpdf_const
-        return log_likelihood
+        if self.use_grad_obs:
+            # Evaluate likelihood model with gradients
+            result = self.likelihood_model.evaluate_and_gradient(self.x_train_new)
+            log_likelihood, log_likelihood_grad = result
+
+            log_likelihood -= self.likelihood_model.normal_distribution.logpdf_const
+            log_likelihood = log_likelihood.reshape((-1, 1))
+
+            # Update stored values
+            self.log_likelihoods = np.concatenate(
+                [self.log_likelihoods, log_likelihood], axis=0
+            )
+            self.log_likelihoods_grad = np.concatenate(
+                [self.log_likelihoods_grad, log_likelihood_grad], axis=0
+            )
+        else:
+            # Evaluate likelihood model without gradients
+            log_likelihood = self.likelihood_model.evaluate(self.x_train_new)["result"]
+            log_likelihood -= self.likelihood_model.normal_distribution.logpdf_const
+            log_likelihood = log_likelihood.reshape((-1, 1))
+
+            # Update stored values
+            self.log_likelihoods = np.concatenate(
+                [self.log_likelihoods, log_likelihood], axis=0
+            )
+
+        return self.log_likelihoods, self.log_likelihoods_grad
 
     def choose_new_samples(self, particles, weights):
         """Choose new training samples.

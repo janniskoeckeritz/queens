@@ -144,10 +144,17 @@ class LogpdfGP(Model):
         self.num_dim = x_train.shape[1]
         self.scaler_x, self.x_train = init_scaler(x_train)
         self.scaler_y = np.max(np.abs(y_train_val))
-        if not self.use_grad_obs:
-            self.y_train = y_train_val / self.scaler_y - self.prior_gp_mean
-        else:
-            raise NotImplementedError("Gradient observations are not implemented yet.")
+
+        self.y_train = y_train_val / self.scaler_y - self.prior_gp_mean
+        if self.use_grad_obs:
+            y_train_grad = y_train_grad / self.scaler_y
+            y_train_grad = np.einsum(
+                "ij,j->ij",
+                y_train_grad,
+                (self.scaler_x.var_)**0.5
+            )
+            self.y_train = np.vstack([self.y_train, y_train_grad.reshape(-1, 1)])
+
         if self.upper_bound is None:
             self.upper_bound = -0.5 * stats.chi2(num_observations).ppf(0.05)
         self.upper_bound = np.array(max(y_train_val.max(), self.upper_bound))
