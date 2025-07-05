@@ -71,6 +71,7 @@ class LogpdfGP(Model):
     def __init__(
         self,
         approx_type,
+        kernel,
         num_hyper=100,
         num_optimizations=3,
         hmc_burn_in=1000,
@@ -625,3 +626,109 @@ def rbf(x1, x2, hyperparameters):
     dists = distances(x1, x2)
     k_x1_x2 = rbf_by_dists(dists, hyperparameters)
     return k_x1_x2
+
+
+class AbstractKernel:
+    """Abstract Kernel class."""
+
+    #def __init__(self, *args, **kwargs):
+        #"""Initialize AbstractKernel."""
+        #raise NotImplementedError("This is an abstract class and cannot be instantiated.")
+
+    @staticmethod
+    def gram():
+        """Compute the Gram matrix."""
+        raise NotImplementedError("This method should be implemented in a subclass.")
+
+    @staticmethod
+    def cross():
+        """Compute the cross-covariance matrix."""
+        raise NotImplementedError("This method should be implemented in a subclass.")
+
+    @staticmethod
+    def cross_gradient():
+        """Compute the cross-covariance matrix for gradient evaluations."""
+        raise NotImplementedError("This method should be implemented in a subclass.")
+
+
+def squared_exponential_point_point(points1, points2, hyperparameters):
+    """Compute the squared exponential kernel for point-point evaluations."""
+    lengthscales = hyperparameters[:-2]
+    signal_std = hyperparameters[-2]
+
+    dists = distances(points1, points2)
+    dist_norm = jnp.sum(dists**2 / (2 * lengthscales**2), axis=2)
+
+    return signal_std**2 * jnp.exp(-dist_norm)
+
+def squared_exponential_grad_point(points1, points2, hyperparameters):
+    """Compute the squared exponential kernel for gradient-point evaluations."""
+    lengthscales = hyperparameters[:-2]
+
+    dists = distances(points1, points2)
+    k_x1_x2 = squared_exponential_point_point(points1, points2, hyperparameters)
+
+    length_adjusted_dists = jnp.einsum("ijk,k->ijk", dists, 1/(lengthscales**2))
+    k_x1_x2_grad = jnp.einsum("ij,ijk->ijk", k_x1_x2, length_adjusted_dists)
+    k_x1_x2_grad = k_x1_x2_grad.reshape((-1, points2.shape[0]))
+
+    return k_x1_x2_grad
+
+def squared_exponential_grad_grad():
+    """Compute the squared exponential kernel for gradient evaluations."""
+    raise NotImplementedError("This method should be implemented in a subclass.")
+
+
+class JaxGeneralKernel(AbstractKernel):
+    """JaxGeneralKernel Class.
+
+    This class implements a general kernel using JAX for point-point and point-gradient evaluations.
+    """
+
+    def __init__(self, kernel_fn):
+        """Initialize JaxGeneralKernel.
+
+        Args:
+            kernel_fn (callable): Function to compute the kernel matrix.
+        """
+        self.kernel_fn = kernel_fn
+    
+        # gram function
+        gram = jax.vmap(kernel_fn, in_axes=(0, None, None), out_axes=0)
+        self.gram = jax.jit(jax.vmap(gram, in_axes=(None, 0, None), out_axes=-1))
+
+    @staticmethod
+    def cross(points1, points2, hyperparameters):
+        """Compute the cross-covariance matrix."""
+        raise NotImplementedError("This method should be implemented in a subclass.")
+
+    @staticmethod
+    def cross_gradient(points1, points2, hyperparameters):
+        """Compute the cross-covariance matrix for gradient evaluations."""
+        raise NotImplementedError("This method should be implemented in a subclass.")
+
+
+def jax_kernel_fn_rbf(x1, x2, hyperparams):
+    """
+    A simple kernel function that computes the squared exponential kernel.
+
+    Args:
+        x1 (jnp.ndarray): First input array.
+        x2 (jnp.ndarray): Second input array.
+        hypers (dict): Hyperparameters for the kernel function, including:
+                        - 'length_scales': jnp.ndarray, length scales for the kernel.
+                        - 'signal_std': float, standard deviation of the signal.
+                        - 'noise': float, noise term.
+
+    Returns:
+        jnp.ndarray: The computed kernel value.
+    """
+
+    length_scales = hyperparams[:-2]
+    signal_std = hyperparams[-2]
+    #noise = hyperparams[-1]
+
+    # Compute the squared exponential kernel
+    length_scale_operator = jnp.diag(1 / length_scales**2)
+    square_dists = jnp.dot((x1 - x2).T, jnp.dot(length_scale_operator, (x1 - x2)))
+    return signal_std**2 * jnp.exp(-0.5 * square_dists)
