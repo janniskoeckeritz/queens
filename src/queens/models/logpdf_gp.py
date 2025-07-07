@@ -154,7 +154,7 @@ class LogpdfGP(Model):
                 (self.scaler_x.var_)**0.5
             )
             self.y_train = np.vstack([self.y_train, y_train_grad.reshape(-1, 1)])
-
+        
         if self.upper_bound is None:
             self.upper_bound = -0.5 * stats.chi2(num_observations).ppf(0.05)
         self.upper_bound = np.array(max(y_train_val.max(), self.upper_bound))

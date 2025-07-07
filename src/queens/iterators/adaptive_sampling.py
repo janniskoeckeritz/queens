@@ -63,6 +63,7 @@ class AdaptiveSampling(Iterator):
         seed=41,
         restart_file=None,
         cs_div_criterion=0.01,
+        verbose=False,
     ):
         """Initialise AdaptiveSampling.
 
@@ -90,10 +91,11 @@ class AdaptiveSampling(Iterator):
         self.restart_file = restart_file
         self.cs_div_criterion = cs_div_criterion
         self.num_dim = initial_train_samples.shape[1]
+        self.verbose = verbose
 
         self.use_grad_obs = False
-        if isinstance(likelihood_model, LogpdfGP):
-            self.use_grad_obs = likelihood_model.use_grad_obs
+        if isinstance(model, LogpdfGP):
+            self.use_grad_obs = model.use_grad_obs
 
         self.x_train_new = initial_train_samples
         self.x_train = np.empty((0, self.parameters.num_parameters))
@@ -103,6 +105,11 @@ class AdaptiveSampling(Iterator):
         self.y_train_grad = np.empty((0, self.num_dim))
         self.model_gradients = np.empty((0, self.likelihood_model.y_obs.size*self.num_dim))
         self.log_likelihoods_grad = np.empty((0, self.num_dim))
+
+        if self.verbose:
+            self.write_results = self.write_results_verbose
+        else:
+            self.write_results = self.write_results_minimal
 
     def pre_run(self):
         """Pre run."""
@@ -242,7 +249,7 @@ class AdaptiveSampling(Iterator):
 
         return x_train_new
 
-    def write_results(self, particles, weights, log_posterior, iteration):
+    def write_results_verbose(self, particles, weights, log_posterior, iteration):
         """Write results to output file and calculate cs_div.
 
         Args:
@@ -288,6 +295,44 @@ class AdaptiveSampling(Iterator):
         results["weights"].append(weights)
         results["log_posterior"].append(log_posterior)
         results["cs_div"].append(cs_div)
+
+        with open(result_file, "wb") as handle:
+            pickle.dump(results, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+        return cs_div
+    
+    def write_results_minimal(self, particles, weights, log_posterior, iteration):
+        result_file = self.global_settings.result_file(".pickle")
+
+        if iteration == 0 and not self.restart_file:
+            results = {
+                "x_train": [],
+                "log_likelihoods"
+                "particles": [],
+                "weights": [],
+                "cs_div": [],
+            }
+            if self.use_grad_obs:
+                results['log_likelihoods_grad'] = []
+            cs_div = np.nan
+        else:
+            results = load_result(result_file)
+            particles_prev = results["particles"]
+            weights_prev = results["weights"]
+            samples_prev = particles_prev[
+                np.random.choice(np.arange(weights_prev.size), 5_000, p=weights_prev)
+            ]
+            samples_curr = particles[np.random.choice(np.arange(weights.size), 5_000, p=weights)]
+            cs_div = float(cauchy_schwarz_divergence(samples_prev, samples_curr))
+            _logger.info("Cauchy Schwarz divergence: %.2e", cs_div)
+
+        results["x_train"] = self.x_train
+        results["log_likelihoods"] = self.log_likelihoods
+        results["particles"] = particles
+        results["weights"] = weights
+        results["cs_div"].append(cs_div)
+        if self.use_grad_obs:
+            results["log_likelihoods_grad"] = self.log_likelihoods_grad
 
         with open(result_file, "wb") as handle:
             pickle.dump(results, handle, protocol=pickle.HIGHEST_PROTOCOL)
