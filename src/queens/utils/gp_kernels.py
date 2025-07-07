@@ -62,7 +62,21 @@ def squared_exponential_grad_point(points1, points2, hyperparameters):
 
     length_adjusted_dists = jnp.einsum("ijk,k->ijk", dists, 1/(lengthscales**2))
     k_x1_x2_grad = jnp.einsum("ij,ijk->ijk", -k_x1_x2, length_adjusted_dists)
+    k_x1_x2_grad = k_x1_x2_grad.transpose((0, 2, 1))
     k_x1_x2_grad = k_x1_x2_grad.reshape((-1, points2.shape[0]))
+
+    return k_x1_x2_grad
+
+def squared_exponential_point_grad(points1, points2, hyperparameters):
+    """Compute the squared exponential kernel for gradient-point evaluations."""
+    lengthscales = hyperparameters[:-2]
+
+    dists = distances(points1, points2)
+    k_x1_x2 = squared_exponential_point_point(points1, points2, hyperparameters)
+
+    length_adjusted_dists = jnp.einsum("ijk,k->ijk", dists, 1/(lengthscales**2))
+    k_x1_x2_grad = jnp.einsum("ij,ijk->ijk", k_x1_x2, length_adjusted_dists)
+    k_x1_x2_grad = k_x1_x2_grad.reshape((points1.shape[0], -1))
 
     return k_x1_x2_grad
 
@@ -142,24 +156,31 @@ class RbfGradKernel(AbstractKernel):
     def gram(points, hyperparameters):
         """Compute the Gram matrix for RBF kernel with gradients."""
         num_points = points.shape[0]
-        val_grad_val = squared_exponential_point_point(points, points, hyperparameters)
-        val_grad_val += jnp.eye(num_points) * hyperparameters[-1]  # Add noise term
+        val_gram_val = squared_exponential_point_point(points, points, hyperparameters)
+        val_gram_val += jnp.eye(num_points) * hyperparameters[-1]  # Add noise term
         grad_gram_val = squared_exponential_grad_point(points, points, hyperparameters)
+        val_gram_grad = squared_exponential_point_grad(points, points, hyperparameters)
         grad_gram_grad = squared_exponential_grad_grad(points, points, hyperparameters)
 
         # Assemble the full Gram matrix
         gram_mat = jnp.vstack([
-            jnp.hstack([val_grad_val, grad_gram_val.T]),
+            jnp.hstack([val_gram_val, val_gram_grad]),
             jnp.hstack([grad_gram_val, grad_gram_grad])
         ])
         
         return gram_mat
-
+    
     @staticmethod
-    def cross(points1, points2, hyperparameters):
+    def cross(points1, points2, hypers):
         """Compute the cross-covariance matrix for RBF kernel with gradients."""
-        raise NotImplementedError(
-            "Cross-covariance for RBFGradKernel is not implemented. ")
+        val_cov_val = squared_exponential_point_point(points1, points2, hypers)
+        val_cov_grad = squared_exponential_point_grad(points1, points2, hypers)
+
+        cov_mat = jnp.hstack([
+            val_cov_val, val_cov_grad
+        ])
+
+        return cov_mat
 
     @staticmethod
     def cross_gradient(points1, points2, hyperparameters):
@@ -291,37 +312,48 @@ class JaxGeneralGradKernel(AbstractKernel):
         noisy_kernel_fn = noise_wrapper(kernel_fn)
     
         gram_components = self.assemble_kernel_components(noisy_kernel_fn)
-        val_gram_val, grad_gram_val, grad_gram_grad = gram_components
+        val_gram_val, grad_gram_val, val_gram_grad, grad_gram_grad = gram_components
 
-        #cov_components = self.assemble_kernel_components(kernel_fn)
-        #val_cov_val, grad_cov_val, grad_cov_grad = cov_components
+        cov_components = self.assemble_kernel_components(kernel_fn)
+        val_cov_val, grad_cov_val, val_cov_grad, grad_cov_grad = cov_components
 
         def gram(points, hypers):
             """Compute the Gram matrix."""
             val_gram_val_mat = val_gram_val(points, points, hypers)
             grad_gram_val_mat = grad_gram_val(points, points, hypers)
+            val_gram_grad_mat = val_gram_grad(points, points, hypers)
             grad_gram_grad_mat = grad_gram_grad(points, points, hypers)
 
             gram_mat = jnp.vstack([
-                jnp.hstack([val_gram_val_mat, grad_gram_val_mat.T]),
+                jnp.hstack([val_gram_val_mat, val_gram_grad_mat]),
                 jnp.hstack([grad_gram_val_mat, grad_gram_grad_mat])
             ])
 
             return gram_mat
+
+        def cross(points1, points2, hypers):
+            """Compute the Gram matrix."""
+            val_cov_val_mat = val_cov_val(points1, points2, hypers)
+            val_cov_grad_mat = val_cov_grad(points1, points2, hypers)
+
+            cov_mat = jnp.hstack([val_cov_val_mat, val_cov_grad_mat])
+
+            return cov_mat
         
         self.gram = jax.jit(gram)
+        self.cross = jax.jit(cross)
     
     @staticmethod
     def gram(points, hyperparameters):
         """Compute the Gram matrix."""
         raise NotImplementedError(
-            "This method is overwritten in the constructor of JaxGeneralGradKernel.")
+            "This method should be overwritten in the constructor of JaxGeneralGradKernel.")
     
     @staticmethod
     def cross(points1, points2, hyperparameters):
         """Compute the cross-covariance matrix."""
         raise NotImplementedError(
-            "This method is overwritten in the constructor of JaxGeneralGradKernel.")
+            "This method should be overwritten in the constructor of JaxGeneralGradKernel.")
 
     
     def assemble_kernel_components(self, kernel_fn):
@@ -333,6 +365,10 @@ class JaxGeneralGradKernel(AbstractKernel):
         grad_variance = flatten_output(jax.vmap(grad_variance, in_axes=(0, None, None), out_axes=0))
         grad_variance = jax.vmap(grad_variance, in_axes=(None, 0, None), out_axes=-1)
 
+        variance_grad = jax.grad(kernel_fn, argnums=1)
+        variance_grad = flatten_output(jax.vmap(variance_grad, in_axes=(None, 0, None), out_axes=0))
+        variance_grad = jax.vmap(variance_grad, in_axes=(0, None, None), out_axes=0)
+
         grad_variance_grad = jax.grad(kernel_fn, argnums=0)
         grad_variance_grad = flatten_output(
             jax.vmap(grad_variance_grad, in_axes=(0, None, None), out_axes=0)
@@ -342,4 +378,4 @@ class JaxGeneralGradKernel(AbstractKernel):
             jax.vmap(grad_variance_grad, in_axes=(None, 0, None), out_axes=-2)
         )
 
-        return variance, grad_variance, grad_variance_grad
+        return variance, grad_variance, variance_grad, grad_variance_grad
